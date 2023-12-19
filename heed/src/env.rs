@@ -310,7 +310,7 @@ impl fmt::Debug for Env {
 
 struct EnvInner {
     env: *mut ffi::MDB_env,
-    dbi_open_mutex: sync::Mutex<HashMap<u32, (TypeId, TypeId, TypeId)>>,
+    dbi_open_mutex: sync::Mutex<HashMap<u32, (TypeId, TypeId, TypeId, TypeId)>>,
     path: PathBuf,
 }
 
@@ -337,7 +337,7 @@ impl Drop for EnvInner {
 
 /// A helper function that transforms the LMDB types into Rust types (`MDB_val` into slices)
 /// and vice versa, the Rust types into C types (`Ordering` into an integer).
-extern "C" fn custom_key_cmp_wrapper<C: Comparator>(
+extern "C" fn custom_cmp_wrapper<C: Comparator>(
     a: *const ffi::MDB_val,
     b: *const ffi::MDB_val,
 ) -> i32 {
@@ -490,7 +490,7 @@ impl Env {
         size += compute_size(stat);
 
         let rtxn = self.read_txn()?;
-        let dbi = self.raw_open_dbi::<DefaultComparator>(rtxn.txn, None, 0)?;
+        let dbi = self.raw_open_dbi::<DefaultComparator, DefaultComparator>(rtxn.txn, None, 0)?;
 
         // We don't want anyone to open an environment while we're computing the stats
         // thus we take a lock on the dbi
@@ -507,7 +507,7 @@ impl Env {
             let key = String::from_utf8(key.to_vec()).unwrap();
             // Calling `ffi::db_stat` on a database instance does not involve key comparison
             // in LMDB, so it's safe to specify a noop key compare function for it.
-            if let Ok(dbi) = self.raw_open_dbi::<DefaultComparator>(rtxn.txn, Some(&key), 0) {
+            if let Ok(dbi) = self.raw_open_dbi::<DefaultComparator, DefaultComparator>(rtxn.txn, Some(&key), 0) {
                 let mut stat = mem::MaybeUninit::uninit();
                 unsafe { mdb_result(ffi::mdb_stat(rtxn.txn, dbi, stat.as_mut_ptr()))? };
                 let stat = unsafe { stat.assume_init() };
@@ -524,7 +524,7 @@ impl Env {
     }
 
     /// Options and flags which can be used to configure how a [`Database`] is opened.
-    pub fn database_options(&self) -> DatabaseOpenOptions<Unspecified, Unspecified> {
+    pub fn database_options(&self) -> DatabaseOpenOptions<Unspecified, Unspecified, Unspecified> {
         DatabaseOpenOptions::new(self)
     }
 
@@ -587,15 +587,15 @@ impl Env {
         options.create(wtxn)
     }
 
-    pub(crate) fn raw_init_database<C: Comparator + 'static>(
+    pub(crate) fn raw_init_database<KeyC: Comparator + 'static, ValueC: Comparator + 'static>(
         &self,
         raw_txn: *mut ffi::MDB_txn,
         name: Option<&str>,
-        types: (TypeId, TypeId, TypeId),
+        types: (TypeId, TypeId, TypeId, TypeId),
         flags: AllDatabaseFlags,
     ) -> Result<u32> {
         let mut lock = self.0.dbi_open_mutex.lock().unwrap();
-        match self.raw_open_dbi::<C>(raw_txn, name, flags.bits()) {
+        match self.raw_open_dbi::<KeyC, ValueC>(raw_txn, name, flags.bits()) {
             Ok(dbi) => {
                 let old_types = lock.entry(dbi).or_insert(types);
                 if *old_types == types {
@@ -608,7 +608,7 @@ impl Env {
         }
     }
 
-    fn raw_open_dbi<C: Comparator + 'static>(
+    fn raw_open_dbi<KeyC: Comparator + 'static, ValueC: Comparator + 'static>(
         &self,
         raw_txn: *mut ffi::MDB_txn,
         name: Option<&str>,
@@ -625,8 +625,11 @@ impl Env {
         //         If a read-only is used with the MDB_CREATE flag, LMDB will throw an error.
         unsafe {
             mdb_result(ffi::mdb_dbi_open(raw_txn, name_ptr, flags, &mut dbi))?;
-            if TypeId::of::<C>() != TypeId::of::<DefaultComparator>() {
-                mdb_result(ffi::mdb_set_compare(raw_txn, dbi, Some(custom_key_cmp_wrapper::<C>)))?;
+            if TypeId::of::<KeyC>() != TypeId::of::<DefaultComparator>() {
+                mdb_result(ffi::mdb_set_compare(raw_txn, dbi, Some(custom_cmp_wrapper::<KeyC>)))?;
+            }
+            if TypeId::of::<ValueC>() != TypeId::of::<DefaultComparator>() {
+                mdb_result(ffi::mdb_set_dupsort(raw_txn, dbi, Some(custom_cmp_wrapper::<ValueC>)))?;
             }
         };
 

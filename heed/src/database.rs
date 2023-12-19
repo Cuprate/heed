@@ -55,14 +55,14 @@ use crate::*;
 /// # Ok(()) }
 /// ```
 #[derive(Debug)]
-pub struct DatabaseOpenOptions<'e, 'n, KC, DC, C = DefaultComparator> {
+pub struct DatabaseOpenOptions<'e, 'n, KC, DC, KeyC = DefaultComparator, ValueC = DefaultComparator> {
     env: &'e Env,
-    types: marker::PhantomData<(KC, DC, C)>,
+    types: marker::PhantomData<(KC, DC, KeyC, ValueC)>,
     name: Option<&'n str>,
     flags: AllDatabaseFlags,
 }
 
-impl<'e> DatabaseOpenOptions<'e, 'static, Unspecified, Unspecified> {
+impl<'e> DatabaseOpenOptions<'e, 'static, Unspecified, Unspecified, Unspecified> {
     /// Create an options struct to open/create a database with specific flags.
     pub fn new(env: &'e Env) -> Self {
         DatabaseOpenOptions {
@@ -74,7 +74,7 @@ impl<'e> DatabaseOpenOptions<'e, 'static, Unspecified, Unspecified> {
     }
 }
 
-impl<'e, 'n, KC, DC, C> DatabaseOpenOptions<'e, 'n, KC, DC, C> {
+impl<'e, 'n, KC, DC, KeyC, ValueC> DatabaseOpenOptions<'e, 'n, KC, DC, KeyC, ValueC> {
     /// Change the type of the database.
     ///
     /// The default types are [`Unspecified`] and require a call to [`Database::remap_types`]
@@ -90,7 +90,18 @@ impl<'e, 'n, KC, DC, C> DatabaseOpenOptions<'e, 'n, KC, DC, C> {
     /// Change the customized key compare function of the database.
     ///
     /// By default no customized compare function will be set when opening a database.
-    pub fn key_comparator<NC>(self) -> DatabaseOpenOptions<'e, 'n, KC, DC, NC> {
+    pub fn key_comparator<NKeyC>(self) -> DatabaseOpenOptions<'e, 'n, KC, DC, NKeyC, ValueC> {
+        DatabaseOpenOptions {
+            env: self.env,
+            types: Default::default(),
+            name: self.name,
+            flags: self.flags,
+        }
+    }
+    /// Change the customized value compare function of the database.
+    ///
+    /// By default no customized compare function will be set when opening a database.
+    pub fn value_comparator<NValueC>(self) -> DatabaseOpenOptions<'e, 'n, KC, DC, KeyC, NValueC> {
         DatabaseOpenOptions {
             env: self.env,
             types: Default::default(),
@@ -131,16 +142,17 @@ impl<'e, 'n, KC, DC, C> DatabaseOpenOptions<'e, 'n, KC, DC, C> {
     ///
     /// If not done, you might raise `Io(Os { code: 22, kind: InvalidInput, message: "Invalid argument" })`
     /// known as `EINVAL`.
-    pub fn open(&self, rtxn: &RoTxn) -> Result<Option<Database<KC, DC, C>>>
+    pub fn open(&self, rtxn: &RoTxn) -> Result<Option<Database<KC, DC, KeyC, ValueC>>>
     where
         KC: 'static,
         DC: 'static,
-        C: Comparator + 'static,
+        KeyC: Comparator + 'static,
+        ValueC: Comparator + 'static,
     {
         assert_eq_env_txn!(self.env, rtxn);
 
-        let types = (TypeId::of::<KC>(), TypeId::of::<DC>(), TypeId::of::<C>());
-        match self.env.raw_init_database::<C>(rtxn.txn, self.name, types, self.flags) {
+        let types = (TypeId::of::<KC>(), TypeId::of::<DC>(), TypeId::of::<KeyC>(), TypeId::of::<ValueC>());
+        match self.env.raw_init_database::<KeyC, ValueC>(rtxn.txn, self.name, types, self.flags) {
             Ok(dbi) => Ok(Some(Database::new(self.env.env_mut_ptr() as _, dbi))),
             Err(Error::Mdb(e)) if e.not_found() => Ok(None),
             Err(e) => Err(e),
@@ -156,17 +168,18 @@ impl<'e, 'n, KC, DC, C> DatabaseOpenOptions<'e, 'n, KC, DC, C> {
     /// LMDB has an important restriction on the unnamed database when named ones are opened.
     /// The names of the named databases are stored as keys in the unnamed one and are immutable,
     /// and these keys can only be read and not written.
-    pub fn create(&self, wtxn: &mut RwTxn) -> Result<Database<KC, DC, C>>
+    pub fn create(&self, wtxn: &mut RwTxn) -> Result<Database<KC, DC, KeyC, ValueC>>
     where
         KC: 'static,
         DC: 'static,
-        C: Comparator + 'static,
+        KeyC: Comparator + 'static,
+        ValueC: Comparator + 'static,
     {
         assert_eq_env_txn!(self.env, wtxn);
 
-        let types = (TypeId::of::<KC>(), TypeId::of::<DC>(), TypeId::of::<C>());
+        let types = (TypeId::of::<KC>(), TypeId::of::<DC>(), TypeId::of::<KeyC>(), TypeId::of::<ValueC>());
         let flags = self.flags | AllDatabaseFlags::CREATE;
-        match self.env.raw_init_database::<C>(wtxn.txn.txn, self.name, types, flags) {
+        match self.env.raw_init_database::<KeyC, ValueC>(wtxn.txn.txn, self.name, types, flags) {
             Ok(dbi) => Ok(Database::new(self.env.env_mut_ptr() as _, dbi)),
             Err(e) => Err(e),
         }
@@ -291,14 +304,14 @@ impl<KC, DC, C> Copy for DatabaseOpenOptions<'_, '_, KC, DC, C> {}
 /// wtxn.commit()?;
 /// # Ok(()) }
 /// ```
-pub struct Database<KC, DC, C = DefaultComparator> {
+pub struct Database<KC, DC, KeyC = DefaultComparator, ValueC = DefaultComparator> {
     pub(crate) env_ident: usize,
     pub(crate) dbi: ffi::MDB_dbi,
-    marker: marker::PhantomData<(KC, DC, C)>,
+    marker: marker::PhantomData<(KC, DC, KeyC, ValueC)>,
 }
 
-impl<KC, DC, C> Database<KC, DC, C> {
-    pub(crate) fn new(env_ident: usize, dbi: ffi::MDB_dbi) -> Database<KC, DC, C> {
+impl<KC, DC, KeyC, ValueC> Database<KC, DC, KeyC, ValueC> {
+    pub(crate) fn new(env_ident: usize, dbi: ffi::MDB_dbi) -> Database<KC, DC, KeyC, ValueC> {
         Database { env_ident, dbi, marker: std::marker::PhantomData }
     }
 
@@ -430,6 +443,30 @@ impl<KC, DC, C> Database<KC, DC, C> {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_key_value<'a, 'txn>(
+        &self,
+        txn: &'txn RoTxn,
+        key: &'a KC::EItem,
+        value: &'a DC::EItem,
+    ) -> Result<(KC::DItem, DC::DItem)>
+        where
+            KC: BytesEncode<'a> + BytesDecode<'txn>,
+            DC: BytesEncode<'a> + BytesDecode<'txn>
+    {
+        assert_eq_env_db_txn!(self, txn);
+
+        let mut cursor = RoCursor::new(txn, self.dbi)?;
+        let key_bytes: Cow<[u8]> = KC::bytes_encode(key).map_err(Error::Encoding)?;
+        let value_bytes: Cow<[u8]> = DC::bytes_encode(value).map_err(Error::Encoding)?;
+        if !cursor.move_on_key_value(&key_bytes, &value_bytes)? {
+            return Err(Error::Mdb(MdbError::NotFound));
+        };
+        let (key_bytes, value_bytes) = cursor.current()?.unwrap();
+        let key = KC::bytes_decode(key_bytes).map_err(Error::Decoding)?;
+        let value = DC::bytes_decode(&value_bytes).map_err(Error::Decoding)?;
+        Ok((key, value))
     }
 
     /// Retrieves the key/value pair lower than the given one in this database.
@@ -1486,10 +1523,10 @@ impl<KC, DC, C> Database<KC, DC, C> {
         &self,
         txn: &'txn RoTxn,
         prefix: &'a KC::EItem,
-    ) -> Result<RoPrefix<'txn, KC, DC, C>>
+    ) -> Result<RoPrefix<'txn, KC, DC, KeyC>>
     where
         KC: BytesEncode<'a>,
-        C: LexicographicComparator,
+        KeyC: LexicographicComparator,
     {
         assert_eq_env_db_txn!(self, txn);
 
@@ -1556,10 +1593,10 @@ impl<KC, DC, C> Database<KC, DC, C> {
         &self,
         txn: &'txn mut RwTxn,
         prefix: &'a KC::EItem,
-    ) -> Result<RwPrefix<'txn, KC, DC, C>>
+    ) -> Result<RwPrefix<'txn, KC, DC, KeyC>>
     where
         KC: BytesEncode<'a>,
-        C: LexicographicComparator,
+        KeyC: LexicographicComparator,
     {
         assert_eq_env_db_txn!(self, txn);
 
@@ -1613,10 +1650,10 @@ impl<KC, DC, C> Database<KC, DC, C> {
         &self,
         txn: &'txn RoTxn,
         prefix: &'a KC::EItem,
-    ) -> Result<RoRevPrefix<'txn, KC, DC, C>>
+    ) -> Result<RoRevPrefix<'txn, KC, DC, KeyC>>
     where
         KC: BytesEncode<'a>,
-        C: LexicographicComparator,
+        KeyC: LexicographicComparator,
     {
         assert_eq_env_db_txn!(self, txn);
 
@@ -1683,10 +1720,10 @@ impl<KC, DC, C> Database<KC, DC, C> {
         &self,
         txn: &'txn mut RwTxn,
         prefix: &'a KC::EItem,
-    ) -> Result<RwRevPrefix<'txn, KC, DC, C>>
+    ) -> Result<RwRevPrefix<'txn, KC, DC, KeyC>>
     where
         KC: BytesEncode<'a>,
-        C: LexicographicComparator,
+        KeyC: LexicographicComparator,
     {
         assert_eq_env_db_txn!(self, txn);
 
@@ -2200,40 +2237,41 @@ impl<KC, DC, C> Database<KC, DC, C> {
     /// wtxn.commit()?;
     /// # Ok(()) }
     /// ```
-    pub fn remap_types<KC2, DC2>(&self) -> Database<KC2, DC2, C> {
+    pub fn remap_types<KC2, DC2>(&self) -> Database<KC2, DC2, KeyC, ValueC> {
         Database::new(self.env_ident, self.dbi)
     }
 
     /// Change the key codec type of this database, specifying the new codec.
-    pub fn remap_key_type<KC2>(&self) -> Database<KC2, DC, C> {
+    pub fn remap_key_type<KC2>(&self) -> Database<KC2, DC, KeyC, ValueC> {
         self.remap_types::<KC2, DC>()
     }
 
     /// Change the data codec type of this database, specifying the new codec.
-    pub fn remap_data_type<DC2>(&self) -> Database<KC, DC2, C> {
+    pub fn remap_data_type<DC2>(&self) -> Database<KC, DC2, KeyC, ValueC> {
         self.remap_types::<KC, DC2>()
     }
 
     /// Wrap the data bytes into a lazy decoder.
-    pub fn lazily_decode_data(&self) -> Database<KC, LazyDecode<DC>, C> {
+    pub fn lazily_decode_data(&self) -> Database<KC, LazyDecode<DC>, KeyC, ValueC> {
         self.remap_types::<KC, LazyDecode<DC>>()
     }
 }
 
-impl<KC, DC, C> Clone for Database<KC, DC, C> {
-    fn clone(&self) -> Database<KC, DC, C> {
+impl<KC, DC, KeyC, ValueC> Clone for Database<KC, DC, KeyC, ValueC> {
+    fn clone(&self) -> Database<KC, DC, KeyC, ValueC> {
         *self
     }
 }
 
-impl<KC, DC, C> Copy for Database<KC, DC, C> {}
+impl<KC, DC, KeyC, ValueC> Copy for Database<KC, DC, KeyC, ValueC> {}
 
-impl<KC, DC, C> fmt::Debug for Database<KC, DC, C> {
+impl<KC, DC, KeyC, ValueC> fmt::Debug for Database<KC, DC, KeyC, ValueC> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Database")
             .field("key_codec", &any::type_name::<KC>())
             .field("data_codec", &any::type_name::<DC>())
-            .field("comparator", &any::type_name::<C>())
+            .field("key_comparator", &any::type_name::<KeyC>())
+            .field("value_comparator", &any::type_name::<ValueC>())
             .finish()
     }
 }
